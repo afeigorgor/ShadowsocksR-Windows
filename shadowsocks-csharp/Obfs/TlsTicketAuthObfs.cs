@@ -1,3 +1,5 @@
+using CryptoBase.Digests;
+using CryptoBase.Macs.Hmac;
 using System;
 using System.Collections.Generic;
 using System.Security.Cryptography;
@@ -27,7 +29,6 @@ namespace Shadowsocks.Obfs
         private uint send_id;
         private bool fastauth;
 
-        protected static RNGCryptoServiceProvider g_random = new();
         protected Random random = new();
         protected const int overhead = 5;
 
@@ -99,14 +100,15 @@ namespace Shadowsocks.Obfs
 
         protected void hmac_sha1(byte[] data, int length)
         {
-            var key = new byte[Server.key.Length + 32];
-            Server.key.CopyTo(key, 0);
-            ((TlsAuthData)Server.data).clientID.CopyTo(key, Server.key.Length);
+            Span<byte> key = new byte[Server.key.Length + 32];
+            Server.key.AsSpan().CopyTo(key);
+            ((TlsAuthData)Server.data).clientID.AsSpan().CopyTo(key[Server.key.Length..]);
 
-            var sha1 = new HMACSHA1(key);
-            var sha1data = sha1.ComputeHash(data, 0, length - 10);
-
-            Array.Copy(sha1data, 0, data, length - 10, 10);
+            using var hmac = HmacUtils.Create(DigestType.Sha1, key);
+            hmac.Update(data.AsSpan(0, length - 10));
+            Span<byte> hash = stackalloc byte[hmac.Length];
+            hmac.GetMac(hash);
+            hash[..10].CopyTo(data.AsSpan(length - 10, 10));
         }
 
         public void PackAuthData(byte[] outdata)
@@ -117,18 +119,14 @@ namespace Shadowsocks.Obfs
                 var randomdata = new byte[18];
                 lock (authData)
                 {
-                    g_random.GetBytes(randomdata);
+                    RandomNumberGenerator.Fill(randomdata);
                 }
                 randomdata.CopyTo(outdata, 4);
             }
 
             lock (authData)
             {
-                if (authData.clientID == null)
-                {
-                    authData.clientID = new byte[32];
-                    g_random.GetBytes(authData.clientID);
-                }
+                authData.clientID ??= RandomNumberGenerator.GetBytes(32);
             }
             var utc_time_second = (ulong)Math.Floor(DateTime.UtcNow.Subtract(new DateTime(1970, 1, 1, 0, 0, 0)).TotalSeconds);
             var utc_time = (uint)utc_time_second;
@@ -282,9 +280,8 @@ namespace Shadowsocks.Obfs
                         }
                         if (!authData.ticket_buf.ContainsKey(host ?? throw new InvalidOperationException()) || random.Next(16) == 0)
                         {
-                            var ticket_size = random.Next(32, 196) * 2;
-                            ticket = new byte[ticket_size];
-                            g_random.GetBytes(ticket);
+                            var ticketSize = random.Next(32, 196) * 2;
+                            ticket = RandomNumberGenerator.GetBytes(ticketSize);
                             authData.ticket_buf[host] = ticket;
                         }
                         else
